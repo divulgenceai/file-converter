@@ -12,6 +12,7 @@
     "@napi-rs/canvas": "^0.1.100",
     "@vitejs/plugin-react": "^4.3.4",
     "archiver": "^8.0.0",
+    "cheerio": "^1.2.0",
     "cors": "^2.8.6",
     "docx": "^9.7.1",
     "express": "^5.2.1",

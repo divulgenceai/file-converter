@@ -6,10 +6,11 @@ A simple file converter for images, audio, video, documents, structured data, an
 
 - Searchable output format catalog
 - Image, audio, video, document, data, and archive conversion
+- Structured document conversion for headings, tables, links, and embedded images
 - Editable output filenames
 - Conversion compatibility guidance
 - Persistent light and dark modes
-- Local conversion backend with bundled tools
+- Cloud and local conversion backends with bundled tools
 
 ## Run locally
 

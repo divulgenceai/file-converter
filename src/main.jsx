@@ -323,10 +323,23 @@ function App() {
         ? buildOutputName(sourceFile.name, formatValue)
         : replaceExtension(current.name || DEFAULT_OPTIONS.name, extensionForFormat(formatValue))
     }));
-    setOutput(null);
+    setFormatCategory(categoryId);
+    setOutput((current) => {
+      if (current?.url) URL.revokeObjectURL(current.url);
+      return null;
+    });
+    if (sourceFile) setStatus('Ready');
     if (clearSearch) {
       setFormatSearch('');
     }
+  };
+
+  const selectCategory = (categoryId) => {
+    setFormatCategory(categoryId);
+    setFormatSearch('');
+    if (categoryId === 'all' || options.category === categoryId) return;
+    const formatValue = defaultFormatFor(categoryId, sourceFile);
+    selectOutput(categoryId, formatValue);
   };
 
   const reset = () => {
@@ -468,9 +481,9 @@ function App() {
             )}
           </div>
           <div className="category-tabs" role="tablist" aria-label="Format categories">
-            <button type="button" role="tab" aria-selected={formatCategory === 'all'} className={formatCategory === 'all' ? 'is-selected' : ''} onClick={() => setFormatCategory('all')}>All</button>
+            <button type="button" role="tab" aria-selected={formatCategory === 'all'} className={formatCategory === 'all' ? 'is-selected' : ''} onClick={() => selectCategory('all')}>All</button>
             {OUTPUT_TYPES.map((item) => (
-              <button key={item.id} type="button" role="tab" aria-selected={formatCategory === item.id} className={formatCategory === item.id ? 'is-selected' : ''} onClick={() => setFormatCategory(item.id)}>{item.label}</button>
+              <button key={item.id} type="button" role="tab" aria-selected={formatCategory === item.id} className={formatCategory === item.id ? 'is-selected' : ''} onClick={() => selectCategory(item.id)}>{item.label}</button>
             ))}
           </div>
           <div className="format-results" aria-label={formatSearch ? 'Matching formats' : formatCategory === 'all' ? 'Popular formats' : `${formatCategory} formats`}>

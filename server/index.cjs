@@ -1,5 +1,6 @@
 const cors = require('cors');
 const crypto = require('node:crypto');
+const cheerio = require('cheerio');
 const express = require('express');
 const ffmpeg = require('fluent-ffmpeg');
 const ffmpegInstaller = require('@ffmpeg-installer/ffmpeg');
@@ -13,7 +14,19 @@ const PDFDocument = require('pdfkit');
 const sharp = require('sharp');
 const XlsxPopulate = require('xlsx-populate');
 const zlib = require('node:zlib');
-const { Document, Packer, Paragraph, TextRun } = require('docx');
+const {
+  Document,
+  ExternalHyperlink,
+  HeadingLevel,
+  ImageRun,
+  Packer,
+  Paragraph,
+  Table,
+  TableCell,
+  TableRow,
+  TextRun,
+  WidthType
+} = require('docx');
 const WordExtractor = require('word-extractor');
 
 const wordExtractor = new WordExtractor();
@@ -243,20 +256,21 @@ async function convertToVideo(source, outputPath, format, ext, options) {
 }
 
 async function convertToDocument(source, outputPath, format) {
-  const text = await extractText(source);
-  if (format === 'txt') return fsp.writeFile(outputPath, text || `${source.name}\nNo extractable text was found.`, 'utf8');
-  if (format === 'md') return fsp.writeFile(outputPath, `# ${source.name}\n\n${text || 'No extractable text was found.'}\n`, 'utf8');
+  if (source.ext === FORMATS[format].ext) {
+    return fsp.copyFile(source.path, outputPath);
+  }
+
+  const structured = await extractStructuredDocument(source);
+  const text = structured.text || `${source.name}\nNo extractable text was found.`;
+  if (format === 'txt') return fsp.writeFile(outputPath, text, 'utf8');
+  if (format === 'md') return fsp.writeFile(outputPath, structuredHtmlToMarkdown(source.name, structured.html), 'utf8');
   if (format === 'rtf') return fsp.writeFile(outputPath, textToRtf(source.name, text), 'utf8');
   if (format === 'html') {
-    return fsp.writeFile(
-      outputPath,
-      `<!doctype html><html><head><meta charset="utf-8"><title>${escapeHtml(source.name)}</title><style>body{font:16px/1.55 system-ui;margin:40px;max-width:920px}pre{white-space:pre-wrap}</style></head><body><h1>${escapeHtml(source.name)}</h1><pre>${escapeHtml(text)}</pre></body></html>`,
-      'utf8'
-    );
+    return fsp.writeFile(outputPath, standaloneHtmlDocument(source.name, structured.html), 'utf8');
   }
-  if (format === 'pdf') return writePdf(outputPath, source.name, text);
-  if (format === 'doc') return fsp.writeFile(outputPath, wordCompatibleDoc(source.name, text), 'utf8');
-  if (format === 'docx') return writeDocx(outputPath, source.name, text);
+  if (format === 'pdf') return writeStructuredPdf(outputPath, source.name, structured.html);
+  if (format === 'doc') return fsp.writeFile(outputPath, wordCompatibleDoc(source.name, structured.html), 'utf8');
+  if (format === 'docx') return writeStructuredDocx(outputPath, source.name, structured.html);
 }
 
 async function convertToData(source, outputPath, format) {
@@ -368,6 +382,214 @@ async function extractText(source) {
   return `${source.name}\n${source.mime || source.ext || 'file'}`;
 }
 
+async function extractStructuredDocument(source) {
+  if (source.ext === 'docx') {
+    const result = await mammoth.convertToHtml(
+      { path: source.path },
+      {
+        convertImage: mammoth.images.imgElement(async (image) => ({
+          src: `data:${image.contentType};base64,${await image.read('base64')}`
+        }))
+      }
+    );
+    const html = sanitizeStructuredHtml(result.value);
+    return { html, text: structuredHtmlToText(html) };
+  }
+
+  if (source.ext === 'html' || source.ext === 'htm') {
+    const html = sanitizeStructuredHtml(await fsp.readFile(source.path, 'utf8'));
+    return { html, text: structuredHtmlToText(html) };
+  }
+
+  if (source.ext === 'doc') {
+    const data = await fsp.readFile(source.path);
+    if (looksLikeHtml(data)) {
+      const html = sanitizeStructuredHtml(data.toString('utf8'));
+      return { html, text: structuredHtmlToText(html) };
+    }
+  }
+
+  if (['xlsx', 'xls', 'csv', 'tsv', 'json'].includes(source.ext)) {
+    const rows = await extractRows(source);
+    const html = rowsToStructuredHtml(rows);
+    return { html, text: structuredHtmlToText(html) };
+  }
+
+  if (isImage(source)) {
+    const data = await fsp.readFile(source.path);
+    const normalized = await normalizeEmbeddedImage(data);
+    const html = `<figure><img src="data:image/png;base64,${normalized.buffer.toString('base64')}" alt="${escapeHtml(
+      source.name
+    )}"><figcaption>${escapeHtml(source.name)}</figcaption></figure>`;
+    return { html, text: source.name };
+  }
+
+  const text = await extractText(source);
+  return { html: textToStructuredHtml(text), text };
+}
+
+function sanitizeStructuredHtml(html) {
+  const $ = cheerio.load(String(html || ''));
+  $('script,style,iframe,object,embed,form,meta,link').remove();
+  $('*').each((_, element) => {
+    for (const attribute of Object.keys(element.attribs || {})) {
+      if (attribute.toLowerCase().startsWith('on') || attribute === 'style') {
+        $(element).removeAttr(attribute);
+      }
+    }
+  });
+  $('a').each((_, element) => {
+    const href = String($(element).attr('href') || '');
+    if (!/^(https?:|mailto:|#)/i.test(href)) $(element).removeAttr('href');
+  });
+  $('img').each((_, element) => {
+    const src = String($(element).attr('src') || '');
+    if (!/^data:image\/[a-z0-9.+-]+;base64,/i.test(src)) $(element).remove();
+  });
+  return $('body').html() || '';
+}
+
+function structuredHtmlToText(html) {
+  const $ = cheerio.load(`<body>${html || ''}</body>`);
+  $('table').each((_, table) => {
+    const rows = $(table)
+      .find('tr')
+      .toArray()
+      .map((row) =>
+        $(row)
+          .children('th,td')
+          .toArray()
+          .map((cell) => $(cell).text().replace(/\s+/g, ' ').trim())
+          .join('\t')
+      )
+      .join('\n');
+    $(table).replaceWith(`<pre>${escapeHtml(rows)}</pre>`);
+  });
+  $('br').replaceWith('\n');
+  $('li').each((_, element) => $(element).prepend('- ').append('\n'));
+  $('p,h1,h2,h3,h4,h5,h6,pre,figure,blockquote').each((_, element) => $(element).append('\n'));
+  return $('body')
+    .text()
+    .replace(/\u00a0/g, ' ')
+    .replace(/[ \t]+\n/g, '\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
+function textToStructuredHtml(text) {
+  return String(text || 'No extractable text was found.')
+    .split(/\r?\n\r?\n/)
+    .map((block) => `<p>${escapeHtml(block).replace(/\r?\n/g, '<br>')}</p>`)
+    .join('');
+}
+
+function rowsToStructuredHtml(rows) {
+  const keys = keysForRows(rows);
+  if (!keys.length) return '<p>No table data was found.</p>';
+  const header = keys.map((key) => `<th scope="col">${escapeHtml(key)}</th>`).join('');
+  const body = rows
+    .map((row) => `<tr>${keys.map((key) => `<td>${escapeHtml(row[key] ?? '')}</td>`).join('')}</tr>`)
+    .join('');
+  return `<table><thead><tr>${header}</tr></thead><tbody>${body}</tbody></table>`;
+}
+
+function standaloneHtmlDocument(title, body) {
+  return `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>${escapeHtml(title)}</title>
+  <style>
+    body{font:16px/1.55 Arial,sans-serif;color:#171717;margin:40px auto;max-width:920px;padding:0 24px}
+    h1,h2,h3,h4,h5,h6{line-height:1.2} table{border-collapse:collapse;width:100%;margin:20px 0}
+    th,td{border:1px solid #999;padding:8px 10px;text-align:left;vertical-align:top} th{background:#eee}
+    img{display:block;max-width:100%;height:auto;margin:18px auto} figcaption{text-align:center;color:#555}
+    a{color:#075dcc} pre{white-space:pre-wrap} blockquote{border-left:4px solid #bbb;margin-left:0;padding-left:16px}
+  </style>
+</head>
+<body>
+  <h1>${escapeHtml(title)}</h1>
+  ${body || '<p>No extractable content was found.</p>'}
+</body>
+</html>`;
+}
+
+function structuredHtmlToMarkdown(title, html) {
+  const $ = cheerio.load(`<body>${html || ''}</body>`);
+  const blocks = [`# ${title}`];
+  for (const element of $('body').children().toArray()) {
+    const tag = String(element.tagName || '').toLowerCase();
+    if (/^h[1-6]$/.test(tag)) {
+      blocks.push(`${'#'.repeat(Number(tag.slice(1)) + 1)} ${markdownInline($, element)}`);
+      continue;
+    }
+    if (tag === 'table') {
+      const rows = $(element)
+        .find('tr')
+        .toArray()
+        .map((row) =>
+          $(row)
+            .children('th,td')
+            .toArray()
+            .map((cell) => $(cell).text().replace(/\|/g, '\\|').replace(/\s+/g, ' ').trim())
+        );
+      if (rows.length) {
+        const width = Math.max(...rows.map((row) => row.length));
+        const normalized = rows.map((row) => [...row, ...Array(Math.max(0, width - row.length)).fill('')]);
+        blocks.push(
+          [
+            `| ${normalized[0].join(' | ')} |`,
+            `| ${normalized[0].map(() => '---').join(' | ')} |`,
+            ...normalized.slice(1).map((row) => `| ${row.join(' | ')} |`)
+          ].join('\n')
+        );
+      }
+      continue;
+    }
+    if (tag === 'ul' || tag === 'ol') {
+      blocks.push(
+        $(element)
+          .children('li')
+          .map((index, item) => `${tag === 'ol' ? `${index + 1}.` : '-'} ${markdownInline($, item)}`)
+          .get()
+          .join('\n')
+      );
+      continue;
+    }
+    if (tag === 'figure' || tag === 'img') {
+      const image = tag === 'img' ? $(element) : $(element).find('img').first();
+      if (image.attr('src')) blocks.push(`![${image.attr('alt') || title}](${image.attr('src')})`);
+      const caption = $(element).find('figcaption').text().trim();
+      if (caption) blocks.push(`_${caption}_`);
+      continue;
+    }
+    const content = markdownInline($, element);
+    if (content) blocks.push(tag === 'blockquote' ? `> ${content}` : content);
+  }
+  return `${blocks.filter(Boolean).join('\n\n')}\n`;
+}
+
+function markdownInline($, element, trim = true) {
+  const value = $(element)
+    .contents()
+    .map((_, node) => {
+      if (node.type === 'text') return node.data;
+      const tag = String(node.tagName || '').toLowerCase();
+      if (tag === 'br') return '  \n';
+      const content = markdownInline($, node, false);
+      const trailingSpace = content.match(/\s+$/)?.[0] || '';
+      if (tag === 'strong' || tag === 'b') return `**${content.trim()}**${trailingSpace}`;
+      if (tag === 'em' || tag === 'i') return `_${content.trim()}_${trailingSpace}`;
+      if (tag === 'a' && $(node).attr('href')) return `[${content}](${$(node).attr('href')})`;
+      return content;
+    })
+    .get()
+    .join('')
+    .replace(/[ \t]+/g, ' ');
+  return trim ? value.trim() : value;
+}
+
 async function extractRows(source) {
   if (['xlsx', 'xls'].includes(source.ext)) {
     const workbook = await XlsxPopulate.fromFileAsync(source.path);
@@ -380,6 +602,16 @@ async function extractRows(source) {
   }
   if (source.ext === 'csv') {
     return csvToRows(await fsp.readFile(source.path, 'utf8'));
+  }
+  if (source.ext === 'tsv') {
+    const parsed = (await fsp.readFile(source.path, 'utf8'))
+      .split(/\r?\n/)
+      .filter(Boolean)
+      .map((line) => line.split('\t'));
+    const headers = parsed.shift() || ['value'];
+    return parsed.map((row) =>
+      Object.fromEntries(headers.map((header, index) => [header || `column_${index + 1}`, row[index] ?? '']))
+    );
   }
   const text = await extractText(source);
   return text.split(/\r?\n/).filter(Boolean).map((line, index) => ({ line: index + 1, value: line }));
@@ -435,38 +667,224 @@ function screenshotVideo(input, output, folder) {
   });
 }
 
-function writePdf(outputPath, title, text) {
-  return new Promise((resolve, reject) => {
+function writeStructuredPdf(outputPath, title, html) {
+  return new Promise(async (resolve, reject) => {
     const doc = new PDFDocument({ margin: 54 });
     const stream = fs.createWriteStream(outputPath);
     stream.on('finish', resolve);
     stream.on('error', reject);
     doc.pipe(stream);
-    doc.fontSize(22).text(title, { underline: true });
-    doc.moveDown();
-    doc.fontSize(11).text(text || 'No extractable text was found.', { lineGap: 4 });
-    doc.end();
+    try {
+      doc.font('Helvetica-Bold').fontSize(22).text(title);
+      doc.moveDown(0.8);
+      const $ = cheerio.load(`<body>${html || '<p>No extractable content was found.</p>'}</body>`);
+      for (const element of $('body').children().toArray()) {
+        await appendPdfElement(doc, $, element);
+      }
+      doc.end();
+    } catch (error) {
+      doc.end();
+      reject(error);
+    }
   });
 }
 
-async function writeDocx(outputPath, title, text) {
+async function appendPdfElement(doc, $, element) {
+  const tag = String(element.tagName || '').toLowerCase();
+  if (/^h[1-6]$/.test(tag)) {
+    ensurePdfSpace(doc, 44);
+    const level = Number(tag.slice(1));
+    doc.font('Helvetica-Bold').fontSize(Math.max(12, 22 - level * 2)).text($(element).text().trim(), { lineGap: 3 });
+    doc.moveDown(0.35);
+    return;
+  }
+  if (tag === 'table') {
+    drawPdfTable(doc, $, element);
+    doc.moveDown(0.6);
+    return;
+  }
+  if (tag === 'img' || tag === 'figure' || $(element).find('img').length) {
+    const image = tag === 'img' ? $(element) : $(element).find('img').first();
+    const parsed = parseDataImage(image.attr('src'));
+    if (parsed) {
+      const normalized = await normalizeEmbeddedImage(parsed.buffer);
+      const width = Math.min(normalized.width, doc.page.width - doc.page.margins.left - doc.page.margins.right);
+      const height = width * (normalized.height / normalized.width);
+      ensurePdfSpace(doc, Math.min(height, 360) + 20);
+      doc.image(normalized.buffer, { fit: [width, 340], align: 'center' });
+      const caption = $(element).find('figcaption').text().trim() || image.attr('alt');
+      if (caption) doc.font('Helvetica-Oblique').fontSize(9).fillColor('#555555').text(caption, { align: 'center' }).fillColor('#000000');
+      doc.moveDown(0.6);
+    }
+    return;
+  }
+  if (tag === 'ul' || tag === 'ol') {
+    $(element)
+      .children('li')
+      .each((index, item) => {
+        ensurePdfSpace(doc, 24);
+        const marker = tag === 'ol' ? `${index + 1}.` : '-';
+        doc.font('Helvetica').fontSize(11).text(`${marker} ${$(item).text().replace(/\s+/g, ' ').trim()}`, {
+          indent: 12,
+          lineGap: 3
+        });
+      });
+    doc.moveDown(0.35);
+    return;
+  }
+  const text = $(element).text().replace(/\s+/g, ' ').trim();
+  if (text) {
+    ensurePdfSpace(doc, 28);
+    doc.font(tag === 'blockquote' ? 'Helvetica-Oblique' : 'Helvetica').fontSize(11).text(text, {
+      indent: tag === 'blockquote' ? 14 : 0,
+      lineGap: 4
+    });
+    doc.moveDown(0.45);
+  }
+}
+
+function drawPdfTable(doc, $, table) {
+  const rows = $(table)
+    .find('tr')
+    .toArray()
+    .map((row) =>
+      $(row)
+        .children('th,td')
+        .toArray()
+        .map((cell) => $(cell).text().replace(/\s+/g, ' ').trim())
+    );
+  const columnCount = Math.max(1, ...rows.map((row) => row.length));
+  const pageWidth = doc.page.width - doc.page.margins.left - doc.page.margins.right;
+  const columnWidth = pageWidth / columnCount;
+  rows.forEach((row, rowIndex) => {
+    doc.font(rowIndex === 0 ? 'Helvetica-Bold' : 'Helvetica').fontSize(9);
+    const rowHeight = Math.max(
+      24,
+      ...row.map((value) => doc.heightOfString(value || ' ', { width: columnWidth - 10, lineGap: 2 }) + 10)
+    );
+    ensurePdfSpace(doc, rowHeight);
+    const y = doc.y;
+    row.forEach((value, columnIndex) => {
+      const x = doc.page.margins.left + columnIndex * columnWidth;
+      if (rowIndex === 0) doc.rect(x, y, columnWidth, rowHeight).fillAndStroke('#eeeeee', '#777777');
+      else doc.rect(x, y, columnWidth, rowHeight).stroke('#999999');
+      doc.fillColor('#111111').text(value || '', x + 5, y + 5, {
+        width: columnWidth - 10,
+        height: rowHeight - 10,
+        lineGap: 2
+      });
+    });
+    doc.y = y + rowHeight;
+  });
+}
+
+function ensurePdfSpace(doc, height) {
+  const bottom = doc.page.height - doc.page.margins.bottom;
+  if (doc.y + height > bottom) doc.addPage();
+}
+
+async function writeStructuredDocx(outputPath, title, html) {
+  const children = [new Paragraph({ text: title, heading: HeadingLevel.TITLE })];
+  const $ = cheerio.load(`<body>${html || '<p>No extractable content was found.</p>'}</body>`);
+  for (const element of $('body').children().toArray()) {
+    const converted = await htmlElementToDocx($, element);
+    if (Array.isArray(converted)) children.push(...converted);
+    else if (converted) children.push(converted);
+  }
   const doc = new Document({
     sections: [
       {
-        children: [
-          new Paragraph({ children: [new TextRun({ text: title, bold: true, size: 32 })] }),
-          ...String(text || 'No extractable text was found.')
-            .split(/\r?\n/)
-            .map((line) => new Paragraph({ children: [new TextRun(line)] }))
-        ]
+        children
       }
     ]
   });
   await fsp.writeFile(outputPath, await Packer.toBuffer(doc));
 }
 
-function wordCompatibleDoc(title, text) {
-  const body = text || 'No extractable text was found.';
+async function htmlElementToDocx($, element) {
+  const tag = String(element.tagName || '').toLowerCase();
+  if (tag === 'table') {
+    const rows = [];
+    for (const row of $(element).find('tr').toArray()) {
+      const cells = [];
+      for (const cell of $(row).children('th,td').toArray()) {
+        const sourceParagraphs = $(cell).children('p').toArray();
+        const paragraphs = [];
+        for (const sourceParagraph of sourceParagraphs.length ? sourceParagraphs : [cell]) {
+          const runs = await inlineDocxRuns($, sourceParagraph, { bold: cell.tagName === 'th' });
+          paragraphs.push(new Paragraph({ children: runs.length ? runs : [new TextRun('')] }));
+        }
+        cells.push(new TableCell({ children: paragraphs }));
+      }
+      if (cells.length) rows.push(new TableRow({ children: cells }));
+    }
+    return rows.length ? new Table({ rows, width: { size: 100, type: WidthType.PERCENTAGE } }) : null;
+  }
+  if (tag === 'ul' || tag === 'ol') {
+    return $(element)
+      .children('li')
+      .toArray()
+      .map(
+        (item, index) =>
+          new Paragraph({
+            bullet: tag === 'ul' ? { level: 0 } : undefined,
+            children: [new TextRun(tag === 'ol' ? `${index + 1}. ${$(item).text().trim()}` : $(item).text().trim())]
+          })
+      );
+  }
+
+  const children = await inlineDocxRuns($, element);
+  const heading = /^h[1-6]$/.test(tag) ? HeadingLevel[`HEADING_${tag.slice(1)}`] : undefined;
+  return new Paragraph({
+    heading,
+    children: children.length ? children : [new TextRun($(element).text().trim())]
+  });
+}
+
+async function inlineDocxRuns($, element, styles = {}) {
+  const runs = [];
+  for (const node of $(element).contents().toArray()) {
+    if (node.type === 'text') {
+      if (node.data) runs.push(new TextRun({ text: node.data, ...styles }));
+      continue;
+    }
+    const tag = String(node.tagName || '').toLowerCase();
+    if (tag === 'br') {
+      runs.push(new TextRun({ break: 1 }));
+      continue;
+    }
+    if (tag === 'img') {
+      const parsed = parseDataImage($(node).attr('src'));
+      if (parsed) {
+        const normalized = await normalizeEmbeddedImage(parsed.buffer);
+        const width = Math.min(normalized.width, 560);
+        runs.push(
+          new ImageRun({
+            data: normalized.buffer,
+            transformation: { width, height: Math.max(1, Math.round(width * (normalized.height / normalized.width))) },
+            type: 'png'
+          })
+        );
+      }
+      continue;
+    }
+    const nextStyles = {
+      ...styles,
+      bold: styles.bold || tag === 'strong' || tag === 'b',
+      italics: styles.italics || tag === 'em' || tag === 'i',
+      underline: styles.underline || tag === 'u' ? {} : undefined
+    };
+    const nested = await inlineDocxRuns($, node, nextStyles);
+    if (tag === 'a' && $(node).attr('href') && nested.length) {
+      runs.push(new ExternalHyperlink({ link: $(node).attr('href'), children: nested }));
+    } else {
+      runs.push(...nested);
+    }
+  }
+  return runs;
+}
+
+function wordCompatibleDoc(title, body) {
   return `<!doctype html>
 <html xmlns:o="urn:schemas-microsoft-com:office:office"
   xmlns:w="urn:schemas-microsoft-com:office:word"
@@ -478,14 +896,31 @@ function wordCompatibleDoc(title, text) {
   <style>
     body { font-family: Arial, sans-serif; font-size: 12pt; line-height: 1.45; }
     h1 { font-size: 18pt; margin-bottom: 18pt; }
-    pre { white-space: pre-wrap; font-family: Arial, sans-serif; }
+    table { border-collapse: collapse; width: 100%; margin: 12pt 0; }
+    th, td { border: 1px solid #777; padding: 6pt; vertical-align: top; }
+    th { background: #eee; font-weight: bold; }
+    img { max-width: 100%; height: auto; }
   </style>
 </head>
 <body>
   <h1>${escapeHtml(title)}</h1>
-  <pre>${escapeHtml(body)}</pre>
+  ${body || '<p>No extractable content was found.</p>'}
 </body>
 </html>`;
+}
+
+function parseDataImage(value) {
+  const match = String(value || '').match(/^data:(image\/[a-z0-9.+-]+);base64,([a-z0-9+/=\s]+)$/i);
+  if (!match) return null;
+  return { mime: match[1], buffer: Buffer.from(match[2].replace(/\s+/g, ''), 'base64') };
+}
+
+async function normalizeEmbeddedImage(buffer) {
+  const image = sharp(buffer, { pages: 1 });
+  const metadata = await image.metadata();
+  const width = Math.max(1, metadata.width || 640);
+  const height = Math.max(1, metadata.height || 480);
+  return { buffer: await image.png().toBuffer(), width, height };
 }
 
 function looksLikeHtml(data) {
