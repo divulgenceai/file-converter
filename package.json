@@ -9,6 +9,7 @@
   },
   "dependencies": {
     "@ffmpeg-installer/ffmpeg": "^1.1.0",
+    "@napi-rs/canvas": "^0.1.100",
     "@vitejs/plugin-react": "^4.3.4",
     "archiver": "^8.0.0",
     "cors": "^2.8.6",

@@ -10,14 +10,12 @@ const multer = require('multer');
 const os = require('node:os');
 const path = require('node:path');
 const PDFDocument = require('pdfkit');
-const pdfParseModule = require('pdf-parse');
 const sharp = require('sharp');
 const XlsxPopulate = require('xlsx-populate');
 const zlib = require('node:zlib');
 const { Document, Packer, Paragraph, TextRun } = require('docx');
 const WordExtractor = require('word-extractor');
 
-const PDFParse = pdfParseModule.PDFParse;
 const wordExtractor = new WordExtractor();
 
 ffmpeg.setFfmpegPath(ffmpegInstaller.path);
@@ -330,11 +328,14 @@ async function extractText(source) {
   }
 
   if (source.ext === 'pdf') {
+    require('@napi-rs/canvas');
+    const pdfParseModule = require('pdf-parse');
     const data = await fsp.readFile(source.path);
     if (typeof pdfParseModule === 'function') {
       const result = await pdfParseModule(data);
       return result.text || '';
     }
+    const PDFParse = pdfParseModule.PDFParse;
     const parser = new PDFParse({ data });
     try {
       const result = await parser.getText();

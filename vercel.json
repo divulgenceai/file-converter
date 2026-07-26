@@ -3,6 +3,7 @@
   "framework": "vite",
   "functions": {
     "api/*.js": {
+      "includeFiles": "node_modules/{@ffmpeg-installer,@napi-rs}/**",
       "maxDuration": 300
     }
   }
