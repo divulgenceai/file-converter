@@ -395,7 +395,7 @@ function App() {
           </div>
         </div>
         <div className="topbar-actions">
-          <span className="privacy-note"><LockKeyhole size={16} /> Your file stays on this device</span>
+          <span className="privacy-note"><LockKeyhole size={16} /> Temporary files are deleted after conversion</span>
           <button className="icon-button" type="button" onClick={() => setTheme((value) => (value === 'dark' ? 'light' : 'dark'))} aria-label={`Switch to ${theme === 'dark' ? 'light' : 'dark'} mode`} title={`Switch to ${theme === 'dark' ? 'light' : 'dark'} mode`}>
             {theme === 'dark' ? <Sun size={19} /> : <Moon size={19} />}
           </button>
@@ -621,7 +621,7 @@ function App() {
         </div>
       </section>
 
-      <footer className="utility-footer"><ShieldCheck size={18} /> Private, local conversion with bundled media and document tools.</footer>
+      <footer className="utility-footer"><ShieldCheck size={18} /> Secure conversion with automatic temporary-file cleanup.</footer>
     </main>
   );
 }
@@ -796,7 +796,7 @@ async function convertWithBackend(file, fileName, format, options) {
     mime,
     previewType,
     preview: preview.slice(0, 1600),
-    message: 'Converted with the local engine.'
+    message: 'Converted successfully.'
   });
 }
 
@@ -1460,7 +1460,7 @@ function describeConversion(file, targetCategory) {
   if (targetCategory === 'video') return { title: 'Rendered video', detail: 'Uses the source media or creates a short visual clip.' };
   if (targetCategory === 'document') return { title: 'Content extraction', detail: 'Exports readable text; complex layout may be simplified.' };
   if (targetCategory === 'data') return { title: 'Structured export', detail: 'Turns rows or readable content into structured data.' };
-  return { title: 'Compatible conversion', detail: 'The local engine can create this output.' };
+  return { title: 'Compatible conversion', detail: 'The converter can create this output.' };
 }
 
 function getExtension(name) {

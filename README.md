@@ -1,6 +1,6 @@
 # File Converter
 
-A simple local file converter for images, audio, video, documents, structured data, and archives.
+A simple file converter for images, audio, video, documents, structured data, and archives.
 
 ## Features
 
