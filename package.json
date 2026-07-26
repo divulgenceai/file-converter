@@ -10,7 +10,7 @@
   "dependencies": {
     "@ffmpeg-installer/ffmpeg": "^1.1.0",
     "@vitejs/plugin-react": "^4.3.4",
-    "archiver": "^7.0.1",
+    "archiver": "^8.0.0",
     "cors": "^2.8.6",
     "docx": "^9.7.1",
     "express": "^5.2.1",

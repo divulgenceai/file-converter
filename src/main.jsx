@@ -373,7 +373,7 @@ function App() {
       setOutput(result);
       setStatus('Converted');
     } catch (error) {
-      setStatus(error.message || 'Conversion failed');
+      setStatus(friendlyConversionError(error));
       setOutput(null);
     } finally {
       setIsConverting(false);
@@ -781,21 +781,14 @@ async function convertWithBackend(file, fileName, format, options) {
   });
 
   if (!response.ok) {
-    let message = 'Conversion failed.';
-    try {
-      const payload = await response.json();
-      message = payload.error || message;
-    } catch {
-      message = await response.text();
-    }
-    throw new Error(message);
+    throw new Error(await readResponseError(response));
   }
 
   const blob = await response.blob();
   const outputName = decodeURIComponent(response.headers.get('X-Output-Name') || encodeURIComponent(fileName));
   const mime = response.headers.get('X-Output-Mime') || format?.mime || blob.type || 'application/octet-stream';
   const previewType = previewTypeForMime(mime, outputName);
-  const preview = previewType === 'text' ? await blob.text() : '';
+  const preview = previewType === 'text' ? await readBlobAsText(blob) : '';
 
   return makeOutput({
     blob,
@@ -1181,11 +1174,8 @@ async function readFileMeta(file) {
 }
 
 function guessCategory(file) {
-  if (file.type.startsWith('image/')) return 'image';
-  if (file.type.startsWith('audio/')) return 'audio';
-  if (file.type.startsWith('video/')) return 'video';
-  if (isLikelyText(file)) return 'document';
-  return 'archive';
+  const family = sourceFamily(file);
+  return family === 'file' ? 'archive' : family;
 }
 
 function defaultFormatFor(category, file) {
@@ -1219,10 +1209,51 @@ async function fileToBestText(file) {
   }
 
   try {
-    return { readable: true, value: await file.text() };
+    return { readable: true, value: await readBlobAsText(file) };
   } catch {
     return { readable: false, value: '' };
   }
+}
+
+async function readResponseError(response) {
+  const fallback = `Conversion failed (${response.status || 'unknown error'}).`;
+  let body = '';
+
+  try {
+    body = await response.text();
+  } catch {
+    return fallback;
+  }
+
+  if (!body) return fallback;
+
+  try {
+    const payload = JSON.parse(body);
+    return payload?.error || payload?.message || fallback;
+  } catch {
+    const plainText = body.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+    return plainText.slice(0, 240) || fallback;
+  }
+}
+
+function readBlobAsText(blob) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result || ''));
+    reader.onerror = () => reject(reader.error || new Error('Could not read the converted text.'));
+    reader.readAsText(blob);
+  });
+}
+
+function friendlyConversionError(error) {
+  const message = String(error?.message || error || 'Conversion failed.').trim();
+  if (/failed to fetch|networkerror|load failed/i.test(message)) {
+    return 'Converter service is unavailable. Refresh and try again.';
+  }
+  if (/failed to execute ['"]text['"]/i.test(message)) {
+    return 'Could not read the converted text. Please try again.';
+  }
+  return message || 'Conversion failed.';
 }
 
 function readAsDataUrl(file) {

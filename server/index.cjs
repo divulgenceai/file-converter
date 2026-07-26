@@ -289,13 +289,13 @@ async function convertToArchive(source, outputPath, format) {
     return;
   }
 
-  const archiver = (await import('archiver')).default;
+  const { TarArchive, ZipArchive } = await import('archiver');
   await new Promise((resolve, reject) => {
     const output = fs.createWriteStream(outputPath);
     const archive =
       format === 'tar' || format === 'tgz'
-        ? archiver('tar', format === 'tgz' ? { gzip: true, gzipOptions: { level: 9 } } : {})
-        : archiver('zip', { zlib: { level: 9 } });
+        ? new TarArchive(format === 'tgz' ? { gzip: true, gzipOptions: { level: 9 } } : {})
+        : new ZipArchive({ zlib: { level: 9 } });
     output.on('close', resolve);
     archive.on('error', reject);
     archive.pipe(output);
