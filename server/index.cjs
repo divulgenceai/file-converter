@@ -25,9 +25,10 @@ ffmpeg.setFfmpegPath(ffmpegInstaller.path);
 const PORT = Number(process.env.CONVERTER_PORT || 8787);
 const ROOT = path.resolve(__dirname, '..');
 const TMP = path.join(os.tmpdir(), 'simple-file-converter');
+fs.mkdirSync(TMP, { recursive: true });
 const upload = multer({
   dest: TMP,
-  limits: { fileSize: 350 * 1024 * 1024 }
+  limits: { fileSize: (process.env.VERCEL ? 4 : 350) * 1024 * 1024 }
 });
 
 const app = express();
@@ -146,10 +147,13 @@ app.use((req, res) => {
   }
 });
 
-app.listen(PORT, async () => {
-  await fsp.mkdir(TMP, { recursive: true });
-  console.log(`Converter backend listening on http://127.0.0.1:${PORT}`);
-});
+if (require.main === module) {
+  app.listen(PORT, () => {
+    console.log(`Converter backend listening on http://127.0.0.1:${PORT}`);
+  });
+}
+
+module.exports = app;
 
 async function convertToTarget(source, outputPath, format, target, options) {
   if (target.family === 'image') return convertToImage(source, outputPath, format, options);
